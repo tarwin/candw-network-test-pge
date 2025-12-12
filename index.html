@@ -38,23 +38,39 @@
 
         .link {
             stroke: #374151; /* Gray-700 */
-            stroke-width: 1px;
-            stroke-opacity: 0.4;
+            stroke-opacity: 0.2;
             pointer-events: none;
+        }
+
+        .link.highlighted {
+            stroke: #F97316; /* Orange-500 */
+            stroke-opacity: 1;
         }
 
         .node-circle {
             fill: #FFFFFF;
             stroke: #F97316; /* Orange-500 */
-            stroke-width: 2.5px;
             cursor: pointer;
-            transition: all 0.2s ease;
         }
-        
+
         .node-circle:hover {
             stroke: #EA580C; /* Orange-600 */
-            stroke-width: 4px;
-            r: 8;
+        }
+
+        .node-circle.project {
+            stroke: #0EA5E9; /* Sky-500 */
+        }
+
+        .node-circle.project:hover {
+            stroke: #0284C7; /* Sky-600 */
+        }
+
+        .node-circle.faded {
+            opacity: 0.4;
+        }
+
+        .link.faded {
+            stroke-opacity: 0.1;
         }
 
         /* Tooltip */
@@ -92,19 +108,40 @@
         </div>
 
         <div class="pointer-events-auto bg-white shadow-lg rounded-md flex overflow-hidden border border-gray-200">
-            <button 
-                v-for="tab in tabs" 
+            <button
+                v-for="tab in tabs"
                 :key="tab"
-                @click="activeTab = tab"
+                @click="selectTab(tab)"
                 :class="['px-6 py-2 text-sm font-medium transition-colors', activeTab === tab ? 'bg-gray-800 text-white' : 'text-gray-600 hover:bg-gray-50']"
             >
                 {{ tab }}
             </button>
         </div>
         
-        <div class="pointer-events-auto bg-gray-800 text-white px-4 py-2 rounded-md shadow-lg text-xs font-semibold" v-if="selectedNode">
-            {{ selectedNode.name }}
-            <div class="font-normal text-gray-300">{{ selectedNode.type }} • {{ selectedNode.status }}</div>
+    </div>
+
+    <div class="absolute top-6 right-6 z-20 pointer-events-auto bg-gray-800 text-white p-4 rounded-md shadow-lg max-w-xs" v-if="selectedNode">
+        <div class="font-semibold text-base mb-1">{{ selectedNode.name }}</div>
+        <div class="text-sm text-gray-300 mb-3">{{ selectedNode.type === 'Institute' ? 'Organization' : selectedNode.type }} • {{ selectedNode.status }}</div>
+        <div class="text-xs text-gray-400 uppercase tracking-wide mb-2">Connected to:</div>
+        <div class="space-y-1 max-h-48 overflow-y-auto">
+            <div v-for="conn in connectedNodes" :key="conn.id" class="text-sm flex items-center gap-2">
+                <span class="w-2 h-2 rounded-full flex-shrink-0" :class="conn.type === 'Project' ? 'bg-sky-500' : 'bg-orange-500'"></span>
+                <span class="text-white">{{ conn.name }}</span>
+            </div>
+            <div v-if="connectedNodes.length === 0" class="text-gray-500 text-sm italic">No connections</div>
+        </div>
+    </div>
+
+    <div class="absolute bottom-6 left-6 z-20 pointer-events-auto bg-white shadow-lg rounded-md p-6 border border-gray-200">
+        <div class="text-base font-semibold text-gray-700 mb-4">Legend</div>
+        <div class="flex items-center gap-4 text-base text-gray-600 mb-2">
+            <span class="w-8 h-8 rounded-full border-[5px] border-orange-500 bg-white inline-block"></span>
+            Organization
+        </div>
+        <div class="flex items-center gap-4 text-base text-gray-600">
+            <span class="w-8 h-8 rounded-full border-[5px] border-sky-500 bg-white inline-block"></span>
+            Project
         </div>
     </div>
 
@@ -117,19 +154,19 @@
     
     <div ref="tooltip" class="tooltip">
         <div class="font-bold text-sm">{{ tooltipData.name }}</div>
-        <div class="text-xs text-gray-300">{{ tooltipData.type }}</div>
+        <div class="text-xs text-gray-300">{{ tooltipData.type === 'Institute' ? 'Organization' : tooltipData.type }}</div>
         <div class="text-xs text-orange-400 mt-1">{{ tooltipData.status }}</div>
     </div>
 
 </div>
 
 <script>
-    const { createApp, ref, onMounted, watch, computed } = Vue;
+    const { createApp, ref, onMounted, watch, computed, nextTick } = Vue;
 
     createApp({
         setup() {
-            const tabs = ['Projects', 'Program', 'Players', 'Partnerships'];
-            const activeTab = ref('Program');
+            const tabs = ['Projects', 'Organizations', 'Partnerships'];
+            const activeTab = ref('Partnerships');
             const searchQuery = ref('');
             const selectedNode = ref(null);
             const tooltipData = ref({ name: '', type: '', status: '' });
@@ -137,6 +174,8 @@
 
             // D3 Variables
             let svg, g, projection, path, zoom;
+            let currentZoomScale = 1;
+            let simulation;
             
             // --- DATA GENERATED FROM CSV ---
             const graphData = {
@@ -194,29 +233,57 @@
 
             const filteredNodes = computed(() => {
                 let nodes = graphData.nodes;
-                
-                // Search Filter
+                const selected = selectedNode.value;
+
+                // Search Filter - but skip if single match is already selected (show all for connections)
                 if (searchQuery.value) {
                     const q = searchQuery.value.toLowerCase();
-                    nodes = nodes.filter(n => n.name.toLowerCase().includes(q));
+                    const matches = nodes.filter(n => n.name.toLowerCase().includes(q));
+
+                    // Only filter if multiple matches or no selection
+                    if (matches.length !== 1 || !selected || selected.id !== matches[0].id) {
+                        nodes = matches;
+                    }
+                    // If single match is selected, show all nodes (don't filter)
                 }
 
                 // Tab Filter
                 if (activeTab.value === 'Projects') {
-                    return nodes.filter(n => n.type === 'Project');
-                } else if (activeTab.value === 'Players') {
+                    let projects = nodes.filter(n => n.type === 'Project');
+                    // If an org is selected, only show projects connected to that org
+                    if (selected && selected.type === 'Institute') {
+                        const connectedProjectIds = new Set();
+                        graphData.links.forEach(l => {
+                            if (l.source === selected.id) connectedProjectIds.add(l.target);
+                            if (l.target === selected.id) connectedProjectIds.add(l.source);
+                        });
+                        projects = projects.filter(p => connectedProjectIds.has(p.id));
+                    }
+                    return projects;
+                } else if (activeTab.value === 'Organizations') {
                     return nodes.filter(n => n.type === 'Institute');
                 }
-                return nodes; // Program & Partnerships show all
+                return nodes; // Partnerships shows all
             });
 
             const filteredLinks = computed(() => {
-                // Only show links in Program/Partnerships tab
-                if (activeTab.value !== 'Program' && activeTab.value !== 'Partnerships') return [];
-                
+                // Only show links in Partnerships tab
+                if (activeTab.value !== 'Partnerships') return [];
+
                 // Filter links where both source and target are in the filteredNodes list
                 const nodeIds = new Set(filteredNodes.value.map(n => n.id));
                 return graphData.links.filter(l => nodeIds.has(l.source) && nodeIds.has(l.target));
+            });
+
+            const connectedNodes = computed(() => {
+                if (!selectedNode.value) return [];
+                const selected = selectedNode.value;
+                const connectedIds = new Set();
+                graphData.links.forEach(l => {
+                    if (l.source === selected.id) connectedIds.add(l.target);
+                    if (l.target === selected.id) connectedIds.add(l.source);
+                });
+                return graphData.nodes.filter(n => connectedIds.has(n.id));
             });
 
             const initMap = async () => {
@@ -240,12 +307,65 @@
 
                 path = d3.geoPath().projection(projection);
 
+                // Initialize node positions from geographic coordinates
+                graphData.nodes.forEach(node => {
+                    const projected = projection(node.coordinates);
+                    node.x = projected[0];
+                    node.y = projected[1];
+                    node.fx = null; // Allow nodes to move
+                    node.fy = null;
+                });
+
+                // Create force simulation to prevent node overlap
+                const collisionRadius = 2; // Minimal - just prevent direct overlap
+                simulation = d3.forceSimulation(graphData.nodes)
+                    .force('collision', d3.forceCollide().radius(collisionRadius).strength(0.5))
+                    .force('x', d3.forceX(d => projection(d.coordinates)[0]).strength(0.05))
+                    .force('y', d3.forceY(d => projection(d.coordinates)[1]).strength(0.05))
+                    .alphaDecay(0.01)
+                    .velocityDecay(0.6) // High friction
+                    .on('tick', () => {
+                        // Update node positions
+                        g.selectAll('.node')
+                            .attr('transform', d => `translate(${d.x}, ${d.y})`);
+
+                        // Update link positions
+                        g.selectAll('.link')
+                            .attr('x1', d => graphData.nodes.find(n => n.id === d.source).x)
+                            .attr('y1', d => graphData.nodes.find(n => n.id === d.source).y)
+                            .attr('x2', d => graphData.nodes.find(n => n.id === d.target).x)
+                            .attr('y2', d => graphData.nodes.find(n => n.id === d.target).y);
+                    });
+
                 // Zoom Behavior
                 zoom = d3.zoom()
                     .scaleExtent([1, 8])
                     .on('zoom', (event) => {
                         mapGroup.attr('transform', event.transform);
                         g.attr('transform', event.transform);
+                        currentZoomScale = event.transform.k;
+
+                        // Restart simulation on zoom
+                        simulation.alpha(0.3).restart();
+
+                        // Scale nodes and links inversely to maintain constant visual size
+                        const baseRadius = 8;
+                        const baseStroke = 3;
+                        const baseLinkStroke = 1;
+                        const highlightedLinkStroke = 2.5;
+
+                        g.selectAll('.node-circle')
+                            .attr('r', function() {
+                                const isSelected = d3.select(this).classed('selected');
+                                return (isSelected ? 11 : baseRadius) / currentZoomScale;
+                            })
+                            .attr('stroke-width', baseStroke / currentZoomScale);
+
+                        g.selectAll('.link')
+                            .attr('stroke-width', function() {
+                                const isHighlighted = d3.select(this).classed('highlighted');
+                                return (isHighlighted ? highlightedLinkStroke : baseLinkStroke) / currentZoomScale;
+                            });
                     });
 
                 svg.call(zoom);
@@ -270,9 +390,43 @@
 
                     renderGraph();
 
+                    // Zoom to fit all nodes with padding
+                    zoomToFitNodes(width, height);
+
                 } catch (error) {
                     console.error("Error loading map data:", error);
                 }
+            };
+
+            const zoomToFitNodes = (width, height) => {
+                const padding = 240;
+                const nodes = graphData.nodes;
+
+                // Use simulated positions for bounding box
+                const xExtent = d3.extent(nodes, d => d.x);
+                const yExtent = d3.extent(nodes, d => d.y);
+
+                const boxWidth = xExtent[1] - xExtent[0];
+                const boxHeight = yExtent[1] - yExtent[0];
+                const boxCenterX = (xExtent[0] + xExtent[1]) / 2;
+                const boxCenterY = (yExtent[0] + yExtent[1]) / 2;
+
+                // Calculate scale to fit with padding
+                const scale = Math.min(
+                    (width - padding * 2) / boxWidth,
+                    (height - padding * 2) / boxHeight
+                );
+
+                // Calculate translation to center
+                const translateX = width / 2 - boxCenterX * scale;
+                const translateY = height / 2 - boxCenterY * scale;
+
+                // Apply the initial transform
+                const initialTransform = d3.zoomIdentity
+                    .translate(translateX, translateY)
+                    .scale(scale);
+
+                svg.call(zoom.transform, initialTransform);
             };
 
             const renderGraph = () => {
@@ -281,23 +435,48 @@
 
                 const currentNodes = filteredNodes.value;
                 const currentLinks = filteredLinks.value;
+                const selected = selectedNode.value;
+
+                // Determine which node IDs are connected to the selected node
+                const connectedIds = new Set();
+                if (selected) {
+                    graphData.links.forEach(l => {
+                        if (l.source === selected.id) connectedIds.add(l.target);
+                        if (l.target === selected.id) connectedIds.add(l.source);
+                    });
+                }
 
                 // Draw Links
+                const baseLinkStroke = 1;
+                const highlightedLinkStroke = 2.5;
+
                 g.selectAll('.link')
                     .data(currentLinks)
                     .enter().append('line')
-                    .attr('class', 'link')
-                    .attr('x1', d => projection(graphData.nodes.find(n => n.id === d.source).coordinates)[0])
-                    .attr('y1', d => projection(graphData.nodes.find(n => n.id === d.source).coordinates)[1])
-                    .attr('x2', d => projection(graphData.nodes.find(n => n.id === d.target).coordinates)[0])
-                    .attr('y2', d => projection(graphData.nodes.find(n => n.id === d.target).coordinates)[1]);
+                    .attr('class', d => {
+                        if (selected && (d.source === selected.id || d.target === selected.id)) {
+                            return 'link highlighted';
+                        }
+                        if (selected) {
+                            return 'link faded';
+                        }
+                        return 'link';
+                    })
+                    .attr('stroke-width', d => {
+                        const isHighlighted = selected && (d.source === selected.id || d.target === selected.id);
+                        return (isHighlighted ? highlightedLinkStroke : baseLinkStroke) / currentZoomScale;
+                    })
+                    .attr('x1', d => graphData.nodes.find(n => n.id === d.source).x)
+                    .attr('y1', d => graphData.nodes.find(n => n.id === d.source).y)
+                    .attr('x2', d => graphData.nodes.find(n => n.id === d.target).x)
+                    .attr('y2', d => graphData.nodes.find(n => n.id === d.target).y);
 
                 // Draw Nodes
                 const nodes = g.selectAll('.node')
                     .data(currentNodes)
                     .enter().append('g')
                     .attr('class', 'node')
-                    .attr('transform', d => `translate(${projection(d.coordinates)})`)
+                    .attr('transform', d => `translate(${d.x}, ${d.y})`)
                     .on('mouseover', (event, d) => {
                         tooltipData.value = d;
                         const t = tooltip.value;
@@ -309,21 +488,65 @@
                         tooltip.value.style.opacity = 0;
                     })
                     .on('click', (event, d) => {
-                        selectedNode.value = d;
+                        // Toggle selection - click again to deselect
+                        if (selectedNode.value && selectedNode.value.id === d.id) {
+                            selectedNode.value = null;
+                        } else {
+                            searchQuery.value = '';
+                            nextTick(() => {
+                                selectedNode.value = d;
+                                activeTab.value = 'Partnerships';
+                            });
+                        }
                         event.stopPropagation();
                     });
 
-                // Node Circles
-                nodes.append('circle')
-                    .attr('class', 'node-circle')
-                    .attr('r', 5);
+                // Node Circles - different colors for projects vs organizations
+                const baseRadius = 8;
+                const baseStroke = 3;
 
-                // Optional: Icons based on type (Simplified as colors/shapes here)
-                // We could add SVG icons inside the G element
+                nodes.append('circle')
+                    .attr('class', d => {
+                        let classes = 'node-circle';
+                        if (d.type === 'Project') classes += ' project';
+                        if (selected && d.id === selected.id) classes += ' selected';
+                        // Fade nodes not connected to selected
+                        if (selected && d.id !== selected.id && !connectedIds.has(d.id)) classes += ' faded';
+                        return classes;
+                    })
+                    .attr('r', d => ((selected && d.id === selected.id) ? 11 : baseRadius) / currentZoomScale)
+                    .attr('stroke-width', baseStroke / currentZoomScale);
             };
 
+            // Function to handle tab selection - clears node selection
+            const selectTab = (tab) => {
+                selectedNode.value = null;
+                activeTab.value = tab;
+            };
+
+            // Watch search query - auto-select if single result
+            watch(searchQuery, (newQuery) => {
+                if (newQuery) {
+                    // Check if there's only one matching node
+                    const q = newQuery.toLowerCase();
+                    const matches = graphData.nodes.filter(n => n.name.toLowerCase().includes(q));
+
+                    if (matches.length === 1) {
+                        // Auto-select the single match (keep search text)
+                        selectedNode.value = matches[0];
+                        activeTab.value = 'Partnerships';
+                    } else {
+                        // Multiple or no matches - clear selection
+                        selectedNode.value = null;
+                    }
+                } else {
+                    // Empty search - clear selection
+                    selectedNode.value = null;
+                }
+            });
+
             // Watch for state changes to re-render
-            watch([activeTab, searchQuery], () => {
+            watch([activeTab, searchQuery, selectedNode], () => {
                 renderGraph();
             });
 
@@ -348,8 +571,10 @@
                 activeTab,
                 searchQuery,
                 selectedNode,
+                connectedNodes,
                 tooltipData,
                 tooltip,
+                selectTab,
                 zoomIn,
                 zoomOut
             };
