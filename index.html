@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>California Wildfire Resilience Network</title>
+    
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    
+    <script src="https://unpkg.com/topojson-client@3"></script>
+
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        
+        /* Map Container */
+        #map-container {
+            background-color: #ffffff;
+            width: 100%;
+            height: 100vh;
+            overflow: hidden;
+            position: relative;
+        }
+
+        /* SVG Elements */
+        .county {
+            fill: #D1D5DB; /* Gray-300 */
+            stroke: #FFFFFF;
+            stroke-width: 0.5px;
+            transition: fill 0.3s ease;
+        }
+        .county:hover {
+            fill: #9CA3AF; /* Gray-400 */
+        }
+
+        .link {
+            stroke: #374151; /* Gray-700 */
+            stroke-width: 1px;
+            stroke-opacity: 0.4;
+            pointer-events: none;
+        }
+
+        .node-circle {
+            fill: #FFFFFF;
+            stroke: #F97316; /* Orange-500 */
+            stroke-width: 2.5px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        
+        .node-circle:hover {
+            stroke: #EA580C; /* Orange-600 */
+            stroke-width: 4px;
+            r: 8;
+        }
+
+        /* Tooltip */
+        .tooltip {
+            position: absolute;
+            background: #1F2937; /* Gray-800 */
+            color: white;
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 12px;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.2s;
+            transform: translate(-50%, -120%);
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+            z-index: 50;
+        }
+
+        /* Transitions */
+        .fade-enter-active, .fade-leave-active {
+            transition: opacity 0.5s ease;
+        }
+        .fade-enter-from, .fade-leave-to {
+            opacity: 0;
+        }
+    </style>
+</head>
+<body>
+
+<div id="app" class="relative w-full h-full">
+    
+    <div class="absolute top-6 left-1/2 transform -translate-x-1/2 z-20 flex flex-col md:flex-row gap-4 items-center w-full max-w-4xl px-4 pointer-events-none">
+        <div class="pointer-events-auto bg-white shadow-lg rounded-md overflow-hidden flex items-center h-10 w-48 border border-gray-200">
+            <input type="text" placeholder="Search..." class="w-full h-full px-3 text-sm outline-none text-gray-700" v-model="searchQuery">
+        </div>
+
+        <div class="pointer-events-auto bg-white shadow-lg rounded-md flex overflow-hidden border border-gray-200">
+            <button 
+                v-for="tab in tabs" 
+                :key="tab"
+                @click="activeTab = tab"
+                :class="['px-6 py-2 text-sm font-medium transition-colors', activeTab === tab ? 'bg-gray-800 text-white' : 'text-gray-600 hover:bg-gray-50']"
+            >
+                {{ tab }}
+            </button>
+        </div>
+        
+        <div class="pointer-events-auto bg-gray-800 text-white px-4 py-2 rounded-md shadow-lg text-xs font-semibold" v-if="selectedNode">
+            {{ selectedNode.name }}
+            <div class="font-normal text-gray-300">{{ selectedNode.type }} • {{ selectedNode.status }}</div>
+        </div>
+    </div>
+
+    <div class="absolute bottom-6 right-6 z-20 flex flex-col gap-2 pointer-events-auto">
+        <button @click="zoomIn" class="bg-white hover:bg-gray-50 text-gray-700 w-10 h-10 rounded-md shadow-lg flex items-center justify-center border border-gray-200 text-xl font-bold">+</button>
+        <button @click="zoomOut" class="bg-white hover:bg-gray-50 text-gray-700 w-10 h-10 rounded-md shadow-lg flex items-center justify-center border border-gray-200 text-xl font-bold">-</button>
+    </div>
+
+    <div id="map-container"></div>
+    
+    <div ref="tooltip" class="tooltip">
+        <div class="font-bold text-sm">{{ tooltipData.name }}</div>
+        <div class="text-xs text-gray-300">{{ tooltipData.type }}</div>
+        <div class="text-xs text-orange-400 mt-1">{{ tooltipData.status }}</div>
+    </div>
+
+</div>
+
+<script>
+    const { createApp, ref, onMounted, watch, computed } = Vue;
+
+    createApp({
+        setup() {
+            const tabs = ['Projects', 'Program', 'Players', 'Partnerships'];
+            const activeTab = ref('Program');
+            const searchQuery = ref('');
+            const selectedNode = ref(null);
+            const tooltipData = ref({ name: '', type: '', status: '' });
+            const tooltip = ref(null);
+
+            // D3 Variables
+            let svg, g, projection, path, zoom;
+            
+            // --- DATA GENERATED FROM CSV ---
+            const graphData = {
+              "nodes": [
+                { "id": 0, "name": "Moore Foundation", "type": "Institute", "coordinates": [-122.1401, 37.4063], "status": "Active" },
+                { "id": 1, "name": "National Forest Foundation", "type": "Institute", "coordinates": [-120.1888, 39.3189], "status": "Active" },
+                { "id": 2, "name": "Burn Bot", "type": "Institute", "coordinates": [-122.4018, 37.6592], "status": "Active" },
+                { "id": 3, "name": "Juniper Re", "type": "Institute", "coordinates": [-122.3987, 37.7996], "status": "Active" },
+                { "id": 4, "name": "Teakettle", "type": "Project", "coordinates": [-119.0152, 36.9718], "status": "Active" },
+                { "id": 5, "name": "Task Force", "type": "Institute", "coordinates": [-121.4657, 38.5991], "status": "Active" },
+                { "id": 6, "name": "Fire Aside", "type": "Institute", "coordinates": [-122.5544, 37.9783], "status": "Active" },
+                { "id": 7, "name": "PyroLogix", "type": "Institute", "coordinates": [-121.4881, 38.5821], "status": "Active" },
+                { "id": 8, "name": "Vibrant Planet", "type": "Institute", "coordinates": [-120.1821, 39.3323], "status": "Active" },
+                { "id": 9, "name": "RockRose Risk", "type": "Institute", "coordinates": [-122.2791, 38.2978], "status": "Active" },
+                { "id": 10, "name": "Madronus", "type": "Institute", "coordinates": [-122.7126, 38.4468], "status": "Active" },
+                { "id": 11, "name": "PG&E", "type": "Institute", "coordinates": [-122.4169, 37.7819], "status": "Active" },
+                { "id": 12, "name": "Marin Fire Prevention Authority", "type": "Institute", "coordinates": [-122.7502, 38.0683], "status": "Active" },
+                { "id": 13, "name": "XyloPlan", "type": "Institute", "coordinates": [-122.2662, 37.8728], "status": "Active" },
+                { "id": 14, "name": "CALFIRE", "type": "Institute", "coordinates": [-121.5098, 38.5543], "status": "Active" },
+                { "id": 15, "name": "Placerville", "type": "Project", "coordinates": [-120.7918, 38.7335], "status": "Active" },
+                { "id": 16, "name": "Nevada City", "type": "Project", "coordinates": [-121.0105, 39.2646], "status": "Active" },
+                { "id": 17, "name": "Planet", "type": "Institute", "coordinates": [-122.4037, 37.7929], "status": "Active" },
+                { "id": 18, "name": "PlanScape", "type": "Institute", "coordinates": [-121.4757, 38.5796], "status": "Active" },
+                { "id": 19, "name": "CWI", "type": "Institute", "coordinates": [-121.8656, 37.6674], "status": "Active" },
+                { "id": 20, "name": "Grass Valley", "type": "Project", "coordinates": [-121.0506, 39.2212], "status": "Active" },
+                { "id": 21, "name": "Incline Village", "type": "Project", "coordinates": [-119.9482, 39.2549], "status": "Active" },
+                { "id": 22, "name": "Marin", "type": "Project", "coordinates": [-122.7380, 38.0608], "status": "Active" },
+                { "id": 23, "name": "USFS", "type": "Institute", "coordinates": [-122.2501, 38.1083], "status": "Active" },
+                { "id": 24, "name": "SIG", "type": "Institute", "coordinates": [-121.8759, 37.6745], "status": "Active" },
+                { "id": 25, "name": "American Forest Foundation", "type": "Institute", "coordinates": [-121.497, 38.5659], "status": "Active" },
+                { "id": 26, "name": "Tahoe Fund", "type": "Institute", "coordinates": [-120.1386, 39.1759], "status": "Active" }
+              ],
+              "links": [
+                { "source": 11, "target": 16 }, { "source": 11, "target": 19 }, { "source": 11, "target": 12 },
+                { "source": 11, "target": 17 }, { "source": 11, "target": 2 }, { "source": 11, "target": 13 },
+                { "source": 11, "target": 15 }, { "source": 19, "target": 16 }, { "source": 19, "target": 17 },
+                { "source": 19, "target": 0 }, { "source": 19, "target": 5 }, { "source": 19, "target": 15 },
+                { "source": 19, "target": 21 }, { "source": 19, "target": 26 }, { "source": 19, "target": 2 },
+                { "source": 19, "target": 4 }, { "source": 19, "target": 23 }, { "source": 19, "target": 14 },
+                { "source": 12, "target": 22 }, { "source": 12, "target": 19 }, { "source": 12, "target": 6 },
+                { "source": 6, "target": 19 }, { "source": 6, "target": 0 }, { "source": 6, "target": 16 },
+                { "source": 6, "target": 20 }, { "source": 10, "target": 16 }, { "source": 10, "target": 19 },
+                { "source": 10, "target": 11 }, { "source": 17, "target": 16 }, { "source": 17, "target": 5 },
+                { "source": 13, "target": 16 }, { "source": 13, "target": 19 }, { "source": 13, "target": 0 },
+                { "source": 8, "target": 16 }, { "source": 8, "target": 11 }, { "source": 8, "target": 26 },
+                { "source": 9, "target": 16 }, { "source": 9, "target": 19 }, { "source": 9, "target": 11 },
+                { "source": 3, "target": 16 }, { "source": 3, "target": 11 }, { "source": 7, "target": 16 },
+                { "source": 7, "target": 8 }, { "source": 7, "target": 11 }, { "source": 18, "target": 16 },
+                { "source": 18, "target": 24 }, { "source": 18, "target": 19 }, { "source": 18, "target": 11 },
+                { "source": 24, "target": 16 }, { "source": 24, "target": 19 }, { "source": 24, "target": 11 },
+                { "source": 25, "target": 16 }, { "source": 25, "target": 11 }, { "source": 1, "target": 16 },
+                { "source": 1, "target": 11 }, { "source": 1, "target": 19 }
+              ]
+            };
+
+            const filteredNodes = computed(() => {
+                let nodes = graphData.nodes;
+                
+                // Search Filter
+                if (searchQuery.value) {
+                    const q = searchQuery.value.toLowerCase();
+                    nodes = nodes.filter(n => n.name.toLowerCase().includes(q));
+                }
+
+                // Tab Filter
+                if (activeTab.value === 'Projects') {
+                    return nodes.filter(n => n.type === 'Project');
+                } else if (activeTab.value === 'Players') {
+                    return nodes.filter(n => n.type === 'Institute');
+                }
+                return nodes; // Program & Partnerships show all
+            });
+
+            const filteredLinks = computed(() => {
+                // Only show links in Program/Partnerships tab
+                if (activeTab.value !== 'Program' && activeTab.value !== 'Partnerships') return [];
+                
+                // Filter links where both source and target are in the filteredNodes list
+                const nodeIds = new Set(filteredNodes.value.map(n => n.id));
+                return graphData.links.filter(l => nodeIds.has(l.source) && nodeIds.has(l.target));
+            });
+
+            const initMap = async () => {
+                const width = document.getElementById('map-container').clientWidth;
+                const height = document.getElementById('map-container').clientHeight;
+
+                svg = d3.select('#map-container').append('svg')
+                    .attr('width', width)
+                    .attr('height', height);
+
+                // Group for map features
+                const mapGroup = svg.append('g');
+                // Group for network graph
+                g = svg.append('g');
+
+                // California Projection
+                projection = d3.geoMercator()
+                    .center([-119.5, 37.2]) // Center on CA
+                    .scale(2500) // Zoom level
+                    .translate([width / 2, height / 2]);
+
+                path = d3.geoPath().projection(projection);
+
+                // Zoom Behavior
+                zoom = d3.zoom()
+                    .scaleExtent([1, 8])
+                    .on('zoom', (event) => {
+                        mapGroup.attr('transform', event.transform);
+                        g.attr('transform', event.transform);
+                    });
+
+                svg.call(zoom);
+
+                // Load Topology - Using US Atlas from jsDelivr CDN
+                try {
+                    const usData = await d3.json('https://cdn.jsdelivr.net/npm/us-atlas@3/counties-10m.json');
+
+                    const allCounties = topojson.feature(usData, usData.objects.counties);
+
+                    // Filter to California counties only (FIPS codes starting with "06")
+                    const caCounties = {
+                        type: "FeatureCollection",
+                        features: allCounties.features.filter(f => String(f.id).startsWith("06"))
+                    };
+
+                    mapGroup.selectAll('path')
+                        .data(caCounties.features)
+                        .enter().append('path')
+                        .attr('class', 'county')
+                        .attr('d', path);
+
+                    renderGraph();
+
+                } catch (error) {
+                    console.error("Error loading map data:", error);
+                }
+            };
+
+            const renderGraph = () => {
+                // Clear previous
+                g.selectAll('*').remove();
+
+                const currentNodes = filteredNodes.value;
+                const currentLinks = filteredLinks.value;
+
+                // Draw Links
+                g.selectAll('.link')
+                    .data(currentLinks)
+                    .enter().append('line')
+                    .attr('class', 'link')
+                    .attr('x1', d => projection(graphData.nodes.find(n => n.id === d.source).coordinates)[0])
+                    .attr('y1', d => projection(graphData.nodes.find(n => n.id === d.source).coordinates)[1])
+                    .attr('x2', d => projection(graphData.nodes.find(n => n.id === d.target).coordinates)[0])
+                    .attr('y2', d => projection(graphData.nodes.find(n => n.id === d.target).coordinates)[1]);
+
+                // Draw Nodes
+                const nodes = g.selectAll('.node')
+                    .data(currentNodes)
+                    .enter().append('g')
+                    .attr('class', 'node')
+                    .attr('transform', d => `translate(${projection(d.coordinates)})`)
+                    .on('mouseover', (event, d) => {
+                        tooltipData.value = d;
+                        const t = tooltip.value;
+                        t.style.opacity = 1;
+                        t.style.left = (event.pageX) + 'px';
+                        t.style.top = (event.pageY) + 'px';
+                    })
+                    .on('mouseout', () => {
+                        tooltip.value.style.opacity = 0;
+                    })
+                    .on('click', (event, d) => {
+                        selectedNode.value = d;
+                        event.stopPropagation();
+                    });
+
+                // Node Circles
+                nodes.append('circle')
+                    .attr('class', 'node-circle')
+                    .attr('r', 5);
+
+                // Optional: Icons based on type (Simplified as colors/shapes here)
+                // We could add SVG icons inside the G element
+            };
+
+            // Watch for state changes to re-render
+            watch([activeTab, searchQuery], () => {
+                renderGraph();
+            });
+
+            const zoomIn = () => {
+                svg.transition().call(zoom.scaleBy, 1.3);
+            };
+
+            const zoomOut = () => {
+                svg.transition().call(zoom.scaleBy, 0.7);
+            };
+
+            onMounted(() => {
+                initMap();
+                window.addEventListener('resize', () => {
+                   d3.select('#map-container svg').remove();
+                   initMap();
+                });
+            });
+
+            return {
+                tabs,
+                activeTab,
+                searchQuery,
+                selectedNode,
+                tooltipData,
+                tooltip,
+                zoomIn,
+                zoomOut
+            };
+        }
+    }).mount('#app');
+</script>
+
+</body>
+</html>
